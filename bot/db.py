@@ -13,9 +13,7 @@ async def _run(fn, *args, **kwargs):
     return await asyncio.to_thread(fn, *args, **kwargs)
 
 
-def _upsert_verified_member(
-    discord_user_id: int, username: str, email: str, guild_id: int, auth_user_id: str
-):
+def _upsert_verified_member(discord_user_id: int, username: str, email: str, guild_id: int):
     return (
         _client.table("members")
         .upsert(
@@ -24,7 +22,6 @@ def _upsert_verified_member(
                 "discord_username": username,
                 "email": email,
                 "guild_id": guild_id,
-                "auth_user_id": auth_user_id,
             },
             on_conflict="discord_user_id",
         )
@@ -32,27 +29,67 @@ def _upsert_verified_member(
     )
 
 
-async def upsert_verified_member(
-    discord_user_id: int, username: str, email: str, guild_id: int, auth_user_id: str
-):
-    return await _run(
-        _upsert_verified_member, discord_user_id, username, email, guild_id, auth_user_id
-    )
+async def upsert_verified_member(discord_user_id: int, username: str, email: str, guild_id: int):
+    return await _run(_upsert_verified_member, discord_user_id, username, email, guild_id)
 
 
-def _upsert_pending_registration(discord_user_id: int, email: str):
+def _get_member_by_email(email: str):
+    res = _client.table("members").select("*").ilike("email", email).limit(1).execute()
+    return res.data[0] if res.data else None
+
+
+async def get_member_by_email(email: str) -> Optional[dict]:
+    return await _run(_get_member_by_email, email)
+
+
+def _delete_member_by_email(email: str):
+    return _client.table("members").delete().ilike("email", email).execute()
+
+
+async def delete_member_by_email(email: str):
+    return await _run(_delete_member_by_email, email)
+
+
+def _delete_pending_registration_by_email(email: str):
+    return _client.table("pending_registrations").delete().ilike("email", email).execute()
+
+
+async def delete_pending_registration_by_email(email: str):
+    return await _run(_delete_pending_registration_by_email, email)
+
+
+def _upsert_pending_registration(discord_user_id: int, email: str, code: str, expires_at: str):
     return (
         _client.table("pending_registrations")
         .upsert(
-            {"discord_user_id": discord_user_id, "email": email},
+            {
+                "discord_user_id": discord_user_id,
+                "email": email,
+                "code": code,
+                "expires_at": expires_at,
+                "attempts": 0,
+            },
             on_conflict="discord_user_id",
         )
         .execute()
     )
 
 
-async def upsert_pending_registration(discord_user_id: int, email: str):
-    return await _run(_upsert_pending_registration, discord_user_id, email)
+async def upsert_pending_registration(discord_user_id: int, email: str, code: str, expires_at):
+    return await _run(_upsert_pending_registration, discord_user_id, email, code, expires_at.isoformat())
+
+
+def _set_pending_attempts(discord_user_id: int, attempts: int):
+    return (
+        _client.table("pending_registrations")
+        .update({"attempts": attempts})
+        .eq("discord_user_id", discord_user_id)
+        .execute()
+    )
+
+
+async def set_pending_attempts(discord_user_id: int, attempts: int):
+    return await _run(_set_pending_attempts, discord_user_id, attempts)
 
 
 def _get_pending_registration(discord_user_id: int):
@@ -171,19 +208,3 @@ def _set_enabled(guild_id: int, enabled: bool, updated_by: int):
 
 async def set_enabled(guild_id: int, enabled: bool, updated_by: int):
     return await _run(_set_enabled, guild_id, enabled, updated_by)
-
-
-def _request_email_otp(email: str):
-    return _client.auth.sign_in_with_otp({"email": email, "options": {"should_create_user": True}})
-
-
-async def request_email_otp(email: str):
-    return await _run(_request_email_otp, email)
-
-
-def _verify_email_otp(email: str, code: str):
-    return _client.auth.verify_otp({"email": email, "token": code, "type": "email"})
-
-
-async def verify_email_otp(email: str, code: str):
-    return await _run(_verify_email_otp, email, code)

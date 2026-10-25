@@ -17,7 +17,7 @@ class StatusUpdateModal(discord.ui.Modal, title="Daily Status Update"):
     )
     note = discord.ui.TextInput(
         label="Notes",
-        placeholder="What did you work on today? Any blockers?",
+        placeholder="What did you learn today?",
         style=discord.TextStyle.paragraph,
         max_length=1000,
         required=False,

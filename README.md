@@ -5,14 +5,21 @@ status update (modules finished + notes) in Supabase.
 
 ## Commands
 
-- `/register <email>` — sends a 6-digit verification code to that email via Supabase Auth (DM or
-  any channel). Re-running it restarts verification with a new/different email.
-- `/verify <code>` — confirms the code from `/register`, creating a verified Supabase Auth user
-  (`auth.users`) linked to your Discord ID.
+- `/register <email>` — the bot generates a 6-digit code, stores it (with a 10-minute expiry) in
+  Supabase, and emails it via Gmail SMTP — plain text only, no links (DM or any channel).
+  Re-running it restarts verification with a new/different email.
+- `/verify <code>` — confirms the code from `/register` and marks that Discord account as
+  verified in the `members` table (up to `OTP_MAX_ATTEMPTS` wrong guesses before you need a new
+  code).
 - `/update` — opens a modal (modules finished, notes) and upserts today's update. Works in
   `#status-updates` or DM. Requires `/register` + `/verify` first.
 - `/status-update start` — **lead-only.** Turns the daily reminder + missed-update report on.
 - `/status-update stop` — **lead-only.** Turns it off.
+- `/status-update remove-by-email <email>` — **lead-only.** Permanently deletes the member
+  registered with that email and all their status update history (cascades via the DB foreign
+  key), plus any pending, unverified registration for that email. Works even if they've already
+  left the server (matched by email, not by picking a current Discord member). Case-insensitive,
+  irreversible.
 - `/status-update test-reminder` — **lead-only.** Runs the 9PM reminder job immediately, regardless
   of on/off state or clock time. For testing.
 - `/status-update test-missed` — **lead-only.** Runs the midnight missed-update report
@@ -50,12 +57,19 @@ Already provisioned in project `cjbgciaiitnnhjvwgggz` (tables: `members`, `statu
 key (Project Settings → API) into `SUPABASE_SERVICE_ROLE_KEY`. Never put this key in client-side
 code.
 
-**One manual dashboard step:** registration uses Supabase Auth's email-OTP sign-in
-(`sign_in_with_otp` / `verify_otp`), which by default emails a magic *link*, not a visible code.
-Since the user confirms from inside Discord (not a browser), the email needs to show the 6-digit
-code instead: go to **Authentication → Email Templates → Magic Link** and make sure the body
-includes `{{ .Token }}` (Supabase's default template already has this alongside the link — just
-don't remove it). No other Auth config changes are needed.
+Email delivery for `/register` does **not** go through Supabase at all — the bot sends the OTP
+code itself via Gmail SMTP (see below), as plain text with no link, so there's nothing for an
+email provider's link-scanner to consume before the user types in the code.
+
+### 2a. Gmail App Password (for sending OTP codes)
+
+1. Enable **2-Step Verification** on the Google account you want the bot to send from (required
+   before Google will let you create an App Password).
+2. Go to <https://myaccount.google.com/apppasswords>, create an app password (select "Mail" /
+   "Other"), and copy the 16-character password into `GMAIL_APP_PASSWORD`. Put that account's
+   address in `GMAIL_ADDRESS`.
+3. That's it — no domain verification needed, since you're sending from an address you already
+   own. Regular Gmail accounts cap at ~500 recipients/day, far more than this bot needs.
 
 ### 3. Run it
 
@@ -90,10 +104,10 @@ give it to yourself.
    Discord's command picker — if `/register` doesn't autocomplete yet, that's why; it still works
    once it appears.
 2. **Register + verify:** run `/register you@realaddress.com` with an email you can actually
-   check. You should get an ephemeral "sent a code" reply and a real email from Supabase within a
-   minute or two. Run `/verify <code>` with the 6 digits from that email. Confirm in Supabase
-   (Table Editor → `members`) that a row appeared with your `discord_user_id`, email, and a
-   non-null `auth_user_id`; check `auth.users` too — it should have a matching confirmed user.
+   check. You should get an ephemeral "sent a code" reply and an email from your configured Gmail
+   account within a few seconds (plain text, just the code — no link). Run `/verify <code>` with
+   those 6 digits. Confirm in Supabase (Table Editor → `members`) that a row appeared with your
+   `discord_user_id` and email, and that `pending_registrations` no longer has a row for you.
 3. **Update:** run `/update`, fill the modal (e.g. modules `1, 2`, a note), submit. Check
    `status_updates` in Supabase — one row for today. Run `/update` again with different values —
    confirm it's still **one row** (overwritten), not two.
@@ -121,8 +135,9 @@ give it to yourself.
 ## Design notes / assumptions
 
 - "Leads" = anyone holding the `LEAD_ROLE_NAME` Discord role.
-- `/register` + `/verify` prove the member actually owns the email (via Supabase Auth OTP) — no
-  roster to validate against, but no blind trust either.
+- `/register` + `/verify` prove the member actually owns the email (bot-generated OTP, emailed via
+  Gmail SMTP, checked against `pending_registrations`) — no roster to validate against, but no
+  blind trust either.
 - Reminders and the missed-update report only consider members who have `/register`ed; the bot
   has no concept of "everyone in the server," only "everyone who signed up."
 - The bot runs for a single guild (`DISCORD_GUILD_ID`).

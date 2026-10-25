@@ -66,10 +66,37 @@ class Admin(commands.Cog):
             ephemeral=True,
         )
 
+    @status_update_group.command(
+        name="remove-by-email",
+        description="Permanently remove a member's registration and status update history by email",
+    )
+    @app_commands.describe(email="The registered email address to remove")
+    @app_commands.check(is_lead)
+    async def remove_by_email(self, interaction: discord.Interaction, email: str):
+        email = email.strip()
+        existing = await db.get_member_by_email(email)
+        await db.delete_member_by_email(email)
+        await db.delete_pending_registration_by_email(email)
+
+        if existing:
+            await interaction.response.send_message(
+                f"🗑️ Removed **{email}** (Discord ID `{existing['discord_user_id']}`) — their "
+                "registration and all status update history have been permanently deleted from the "
+                "database.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"No registered member found with email **{email}**. Cleared any pending "
+                "registration for that email just in case.",
+                ephemeral=True,
+            )
+
     @start.error
     @stop.error
     @test_reminder.error
     @test_missed.error
+    @remove_by_email.error
     async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.CheckFailure):
             await interaction.response.send_message(

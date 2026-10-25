@@ -1,18 +1,25 @@
 import logging
 import re
+import secrets
+from datetime import datetime, timedelta
 
 import discord
 from discord import app_commands
 from discord.ext import commands
-from supabase import AuthApiError
 
 import db
-from config import DISCORD_GUILD_ID
+from config import DISCORD_GUILD_ID, OTP_MAX_ATTEMPTS, OTP_TTL_MINUTES
+from email_sender import send_otp_email
+from utils import now_local
 
 log = logging.getLogger("status_bot")
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 CODE_RE = re.compile(r"^\d{6}$")
+
+
+def _generate_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
 
 
 class Registration(commands.Cog):
@@ -34,20 +41,22 @@ class Registration(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
 
+        code = _generate_code()
+        expires_at = now_local() + timedelta(minutes=OTP_TTL_MINUTES)
+
         try:
-            await db.request_email_otp(email)
-        except AuthApiError:
-            log.exception("Failed to send OTP to %s", email)
+            await send_otp_email(email, code)
+        except Exception:
+            log.exception("Failed to send OTP email to %s", email)
             await interaction.followup.send(
-                "Couldn't send a verification email right now (it may be rate-limited). "
-                "Please try again in a minute.",
+                "Couldn't send the verification email right now. Please try again shortly.",
                 ephemeral=True,
             )
             return
 
-        await db.upsert_pending_registration(interaction.user.id, email)
+        await db.upsert_pending_registration(interaction.user.id, email, code, expires_at)
         await interaction.followup.send(
-            f"📧 Sent a 6-digit verification code to **{email}**. "
+            f"📧 Sent a 6-digit verification code to **{email}** (expires in {OTP_TTL_MINUTES} minutes). "
             f"Run `/verify <code>` here with that code to finish registering.",
             ephemeral=True,
         )
@@ -73,21 +82,26 @@ class Registration(commands.Cog):
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
-
-        try:
-            result = await db.verify_email_otp(pending["email"], code)
-        except AuthApiError:
-            await interaction.followup.send(
-                "That code is invalid or expired. Run `/register` again to get a new one.",
-                ephemeral=True,
+        if now_local() > datetime.fromisoformat(pending["expires_at"]):
+            await db.delete_pending_registration(interaction.user.id)
+            await interaction.response.send_message(
+                "That code expired. Run `/register` again to get a new one.", ephemeral=True
             )
             return
 
-        if result.user is None:
-            await interaction.followup.send(
-                "That code is invalid or expired. Run `/register` again to get a new one.",
-                ephemeral=True,
+        if pending["attempts"] >= OTP_MAX_ATTEMPTS:
+            await db.delete_pending_registration(interaction.user.id)
+            await interaction.response.send_message(
+                "Too many incorrect attempts. Run `/register` again to get a new code.", ephemeral=True
+            )
+            return
+
+        if not secrets.compare_digest(code, pending["code"]):
+            attempts = pending["attempts"] + 1
+            await db.set_pending_attempts(interaction.user.id, attempts)
+            remaining = OTP_MAX_ATTEMPTS - attempts
+            await interaction.response.send_message(
+                f"That code is incorrect. {remaining} attempt(s) left.", ephemeral=True
             )
             return
 
@@ -96,10 +110,9 @@ class Registration(commands.Cog):
             username=str(interaction.user),
             email=pending["email"],
             guild_id=DISCORD_GUILD_ID,
-            auth_user_id=result.user.id,
         )
         await db.delete_pending_registration(interaction.user.id)
-        await interaction.followup.send(
+        await interaction.response.send_message(
             f"✅ Verified **{pending['email']}**. Use `/update` any day to submit your status update.",
             ephemeral=True,
         )
